@@ -37,6 +37,8 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Feature registration which offers calls to all features
@@ -44,12 +46,29 @@ import java.util.*;
  */
 public class FeatureManager {
 
+    /** Initial delay before processing queued proxy joins to allow backend tablist remove packet to arrive */
+    private static final int PROXY_JOIN_INITIAL_DELAY_MS = 200;
+
+    /** Delay for continuing large proxy join bursts in chunks */
+    private static final int PROXY_JOIN_CONTINUE_DELAY_MS = 25;
+
+    /** Maximum amount of proxy joins processed in a single burst chunk */
+    private static final int PROXY_JOIN_BATCH_SIZE = 40;
+
     /** Map of all registered feature where key is feature's identifier */
     private final Map<String, TabFeature> features = new LinkedHashMap<>();
 
     /** All registered features in an array to avoid memory allocations on iteration */
     @NotNull
     private TabFeature[] values = new TabFeature[0];
+
+    /** Pending proxy joins keyed by real UUID, used to coalesce burst joins */
+    @NotNull
+    private final Map<UUID, ProxyPlayer> pendingProxyJoins = new ConcurrentHashMap<>();
+
+    /** Flag preventing scheduling duplicate queue flush tasks */
+    @NotNull
+    private final AtomicBoolean proxyJoinFlushScheduled = new AtomicBoolean(false);
 
     /**
      * Calls load() on all features.
@@ -397,25 +416,9 @@ public class FeatureManager {
      *          Player who joined
      */
     public void onJoin(@NotNull ProxyPlayer connectedPlayer) {
-        // Delay to let server remove the player from tablist, and then we can potentially add the player back
-        // No delay could cause the server to send tablist remove packet of real player AFTER we sent add, removing the player
-        TAB.getInstance().getCpu().getProcessingThread().executeLater(new TimedCaughtTask(TAB.getInstance().getCpu(), () -> {
-            if (connectedPlayer.getConnectionState() == ProxyPlayer.ConnectionState.DISCONNECTED) return; // Player immediately disconnected in the meantime
-            connectedPlayer.setConnectionState(ProxyPlayer.ConnectionState.CONNECTED);
-            for (TabFeature f : values) {
-                if (!(f instanceof ProxyFeature)) continue;
-                TimedCaughtTask task = new TimedCaughtTask(TAB.getInstance().getCpu(),
-                        () -> ((ProxyFeature) f).onJoin(connectedPlayer), f.getFeatureName(), CpuUsageCategory.PLAYER_JOIN);
-                if (f instanceof CustomThreaded) {
-                    ((CustomThreaded) f).getCustomThread().execute(task);
-                } else {
-                    task.run();
-                }
-            }
-            if (connectedPlayer.isVanished()) {
-                onVanishStatusChange(connectedPlayer);
-            }
-        }, getFeature(TabConstants.Feature.PROXY_SUPPORT).getFeatureName(), CpuUsageCategory.PLAYER_JOIN), 200);
+        connectedPlayer.setConnectionState(ProxyPlayer.ConnectionState.QUEUED);
+        pendingProxyJoins.put(connectedPlayer.getUniqueId(), connectedPlayer);
+        scheduleProxyJoinFlush(PROXY_JOIN_INITIAL_DELAY_MS);
     }
 
     /**
@@ -445,6 +448,10 @@ public class FeatureManager {
      */
     public void onQuit(@NotNull ProxyPlayer disconnectedPlayer) {
         disconnectedPlayer.setConnectionState(ProxyPlayer.ConnectionState.DISCONNECTED);
+        ProxyPlayer pending = pendingProxyJoins.get(disconnectedPlayer.getUniqueId());
+        if (pending != null && pending.getTablistId().equals(disconnectedPlayer.getTablistId())) {
+            pendingProxyJoins.remove(disconnectedPlayer.getUniqueId(), pending);
+        }
         for (TabFeature f : values) {
             if (!(f instanceof ProxyFeature)) continue;
             TimedCaughtTask task = new TimedCaughtTask(TAB.getInstance().getCpu(),
@@ -456,6 +463,57 @@ public class FeatureManager {
             }
         }
         removeforcedDisplayName(disconnectedPlayer.getTablistId());
+    }
+
+    private void scheduleProxyJoinFlush(int delayMillis) {
+        if (!proxyJoinFlushScheduled.compareAndSet(false, true)) return;
+        ProxySupport proxySupport = getFeature(TabConstants.Feature.PROXY_SUPPORT);
+        String featureName = proxySupport == null ? TabConstants.Feature.PROXY_SUPPORT : proxySupport.getFeatureName();
+        TAB.getInstance().getCpu().getProcessingThread().executeLater(new TimedCaughtTask(
+                TAB.getInstance().getCpu(),
+                this::flushProxyJoinQueue,
+                featureName,
+                CpuUsageCategory.PLAYER_JOIN
+        ), delayMillis);
+    }
+
+    private void flushProxyJoinQueue() {
+        proxyJoinFlushScheduled.set(false);
+        if (pendingProxyJoins.isEmpty()) return;
+
+        List<ProxyPlayer> batch = new ArrayList<>(PROXY_JOIN_BATCH_SIZE);
+        for (Map.Entry<UUID, ProxyPlayer> entry : pendingProxyJoins.entrySet()) {
+            if (batch.size() >= PROXY_JOIN_BATCH_SIZE) break;
+            if (pendingProxyJoins.remove(entry.getKey(), entry.getValue())) {
+                batch.add(entry.getValue());
+            }
+        }
+
+        for (ProxyPlayer connectedPlayer : batch) {
+            processProxyJoin(connectedPlayer);
+        }
+
+        if (!pendingProxyJoins.isEmpty()) {
+            scheduleProxyJoinFlush(PROXY_JOIN_CONTINUE_DELAY_MS);
+        }
+    }
+
+    private void processProxyJoin(@NotNull ProxyPlayer connectedPlayer) {
+        if (connectedPlayer.getConnectionState() == ProxyPlayer.ConnectionState.DISCONNECTED) return;
+        connectedPlayer.setConnectionState(ProxyPlayer.ConnectionState.CONNECTED);
+        for (TabFeature f : values) {
+            if (!(f instanceof ProxyFeature)) continue;
+            TimedCaughtTask task = new TimedCaughtTask(TAB.getInstance().getCpu(),
+                    () -> ((ProxyFeature) f).onJoin(connectedPlayer), f.getFeatureName(), CpuUsageCategory.PLAYER_JOIN);
+            if (f instanceof CustomThreaded) {
+                ((CustomThreaded) f).getCustomThread().execute(task);
+            } else {
+                task.run();
+            }
+        }
+        if (connectedPlayer.isVanished()) {
+            onVanishStatusChange(connectedPlayer);
+        }
     }
 
     /**

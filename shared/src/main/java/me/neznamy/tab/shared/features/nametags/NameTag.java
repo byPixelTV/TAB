@@ -6,6 +6,7 @@ import me.neznamy.tab.api.nametag.NameTagManager;
 import me.neznamy.tab.shared.Property;
 import me.neznamy.tab.shared.TAB;
 import me.neznamy.tab.shared.TabConstants;
+import me.neznamy.tab.shared.TabConstants.Permission;
 import me.neznamy.tab.shared.config.MessageFile;
 import me.neznamy.tab.shared.cpu.ThreadExecutor;
 import me.neznamy.tab.shared.cpu.TimedCaughtTask;
@@ -123,6 +124,8 @@ public class NameTag extends TabFeature implements NameTagManager, JoinListener,
         if (proxy != null) {
             for (ProxyPlayer proxied : proxy.getProxyPlayers().values()) {
                 if (proxied.getNametag() == null) continue; // This proxy player is not loaded yet
+                if (!connectedPlayer.server.canSee(proxied.server)) continue;
+                if (proxied.isVanished() && !connectedPlayer.hasPermission(Permission.SEE_VANISHED)) continue;
                 connectedPlayer.teamData.registerTeam(
                         proxied,
                         proxied.getNametag().getResolvedTeamName(),
@@ -142,6 +145,7 @@ public class NameTag extends TabFeature implements NameTagManager, JoinListener,
     @Override
     public void onQuit(@NotNull TabPlayer disconnectedPlayer) {
         onlinePlayers.removePlayer(disconnectedPlayer);
+        proxyHandler.removeLocalPlayer(disconnectedPlayer.getUniqueId());
         unregisterTeam(disconnectedPlayer);
     }
 

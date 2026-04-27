@@ -22,6 +22,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -29,12 +30,13 @@ import java.util.stream.Collectors;
  */
 @Getter
 public class PlayerList extends RefreshableFeature implements TabListFormatManager, JoinListener, Loadable,
-        UnLoadable, WorldSwitchListener, ServerSwitchListener, VanishListener, ProxyFeature, GroupListener, Dumpable {
+        UnLoadable, QuitListener, WorldSwitchListener, ServerSwitchListener, VanishListener, ProxyFeature, GroupListener, Dumpable {
 
     @NotNull private final StringToComponentCache cache = new StringToComponentCache("Tablist name formatting", 1000);
     @NotNull private final TablistFormattingConfiguration configuration;
     @Nullable private final ProxySupport proxy = TAB.getInstance().getFeatureManager().getFeature(TabConstants.Feature.PROXY_SUPPORT);
     @NotNull private final DisableChecker disableChecker;
+    @NotNull private final Map<UUID, String> lastSentProxyData = new ConcurrentHashMap<>();
 
     /**
      * Constructs new instance, registers disable checker into feature manager and starts anti-override.
@@ -253,6 +255,11 @@ public class PlayerList extends RefreshableFeature implements TabListFormatManag
     }
 
     @Override
+    public void onQuit(@NotNull TabPlayer disconnectedPlayer) {
+        lastSentProxyData.remove(disconnectedPlayer.getUniqueId());
+    }
+
+    @Override
     public void onVanishStatusChange(@NotNull TabPlayer player) {
         if (player.isVanished()) return;
         formatPlayerForEveryone(player, true);
@@ -415,7 +422,14 @@ public class PlayerList extends RefreshableFeature implements TabListFormatManag
     // ------------------
 
     private void sendProxyMessage(@NotNull TabPlayer player) {
+        sendProxyMessage(player, false);
+    }
+
+    private void sendProxyMessage(@NotNull TabPlayer player, boolean force) {
         if (proxy != null) {
+            String payload = player.tablistData.prefix.get() + '\u0000' + player.tablistData.name.get() + '\u0000' + player.tablistData.suffix.get();
+            String previous = lastSentProxyData.put(player.getUniqueId(), payload);
+            if (!force && payload.equals(previous)) return;
             proxy.sendMessage(new PlayerListProxyPlayerData(
                     this,
                     proxy.getIdCounter().incrementAndGet(),
@@ -432,7 +446,7 @@ public class PlayerList extends RefreshableFeature implements TabListFormatManag
     @Override
     public void onProxyLoadRequest() {
         for (TabPlayer all : TAB.getInstance().getOnlinePlayers()) {
-            sendProxyMessage(all);
+            sendProxyMessage(all, true);
         }
     }
 
@@ -456,6 +470,7 @@ public class PlayerList extends RefreshableFeature implements TabListFormatManag
         if (player.isVanished()) return;
         if (player.getTabFormat() == null) return; // Player not loaded yet
         for (TabPlayer viewer : TAB.getInstance().getOnlinePlayers()) {
+            if (!viewer.server.canSee(player.server)) continue;
             viewer.getTabList().updateDisplayName(player.getTablistId(), player.getTabFormat().getFormatComponent());
         }
     }

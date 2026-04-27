@@ -1,6 +1,7 @@
 package me.neznamy.tab.shared.features.nametags;
 
 import lombok.RequiredArgsConstructor;
+import me.neznamy.tab.shared.TabConstants;
 import me.neznamy.tab.shared.features.proxy.ProxyPlayer;
 import me.neznamy.tab.shared.features.types.ProxyFeature;
 import me.neznamy.tab.shared.platform.Scoreboard;
@@ -8,6 +9,9 @@ import me.neznamy.tab.shared.platform.TabPlayer;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collections;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Class for handling proxy players in NameTag feature.
@@ -18,9 +22,18 @@ public class NameTagProxyHandler implements ProxyFeature {
 
     @NotNull
     private final NameTag feature;
+    @NotNull
+    private final Map<UUID, String> lastSentData = new ConcurrentHashMap<>();
 
     public void sendProxyMessage(@NotNull TabPlayer player) {
+        sendProxyMessage(player, false);
+    }
+
+    public void sendProxyMessage(@NotNull TabPlayer player, boolean force) {
         if (feature.getProxy() != null) {
+            String payload = player.teamData.teamName + '\u0000' + player.teamData.prefix.get() + '\u0000' + player.teamData.suffix.get() + '\u0000' + player.teamData.getTeamVisibility(player);
+            String previous = lastSentData.put(player.getUniqueId(), payload);
+            if (!force && payload.equals(previous)) return;
             feature.getProxy().sendMessage(new NameTagProxyPlayerData(
                     feature,
                     feature.getProxy().getIdCounter().incrementAndGet(),
@@ -33,10 +46,14 @@ public class NameTagProxyHandler implements ProxyFeature {
         }
     }
 
+    public void removeLocalPlayer(@NotNull UUID playerId) {
+        lastSentData.remove(playerId);
+    }
+
     @Override
     public void onProxyLoadRequest() {
         for (TabPlayer all : feature.getOnlinePlayers().getPlayers()) {
-            sendProxyMessage(all);
+            sendProxyMessage(all, true);
         }
     }
 
@@ -53,6 +70,8 @@ public class NameTagProxyHandler implements ProxyFeature {
     public void onJoin(@NotNull ProxyPlayer player) {
         if (player.getNametag() == null) return; // Player not loaded yet
         for (TabPlayer viewer : feature.getOnlinePlayers().getPlayers()) {
+            if (!viewer.server.canSee(player.server)) continue;
+            if (player.isVanished() && !viewer.hasPermission(TabConstants.Permission.SEE_VANISHED)) continue;
             viewer.teamData.registerTeam(
                     player,
                     player.getNametag().getResolvedTeamName(),

@@ -6,6 +6,7 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.ToString;
 import me.neznamy.tab.shared.TAB;
+import me.neznamy.tab.shared.TabConstants;
 import me.neznamy.tab.shared.chat.component.TabComponent;
 import me.neznamy.tab.shared.cpu.ThreadExecutor;
 import me.neznamy.tab.shared.features.proxy.ProxyPlayer;
@@ -95,6 +96,8 @@ public class NameTagProxyPlayerData extends ProxyMessage {
             TabComponent lastColor = feature.getLastColorCache().get(this.prefix);
             TabComponent suffix = feature.getSuffixCache().get(this.suffix);
             for (TabPlayer viewer : feature.getOnlinePlayers().getPlayers()) {
+                if (!viewer.server.canSee(target.server)) continue;
+                if (target.isVanished() && !viewer.hasPermission(TabConstants.Permission.SEE_VANISHED)) continue;
                 if (oldData != null && resolvedTeamName.equals(oldData.resolvedTeamName)) {
                     if (viewer.teamData.hasTeamRegistered(target)) {
                         viewer.getScoreboard().updateTeam(
