@@ -6,6 +6,7 @@ import com.google.common.io.ByteStreams;
 import lombok.Getter;
 import me.neznamy.tab.shared.TAB;
 import me.neznamy.tab.shared.TabConstants.CpuUsageCategory;
+import me.neznamy.tab.shared.cpu.CpuManager;
 import me.neznamy.tab.shared.cpu.TimedCaughtTask;
 import me.neznamy.tab.shared.data.Server;
 import me.neznamy.tab.shared.features.proxy.message.*;
@@ -160,7 +161,8 @@ public abstract class ProxySupport extends TabFeature implements JoinListener, Q
         out.writeUTF(classToString.get(message.getClass()));
         TAB.getInstance().debug("[Proxy Support] Encoding message " + message);
         message.write(out);
-        sendMessage(Base64.getEncoder().encodeToString(out.toByteArray()));
+        String payload = Base64.getEncoder().encodeToString(out.toByteArray());
+        CpuManager.getPluginMessageEncodeThread().execute(() -> sendMessage(payload));
     }
 
     /**

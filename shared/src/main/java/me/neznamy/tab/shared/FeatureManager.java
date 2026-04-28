@@ -50,10 +50,22 @@ public class FeatureManager {
     private static final int PROXY_JOIN_INITIAL_DELAY_MS = 200;
 
     /** Delay for continuing large proxy join bursts in chunks */
-    private static final int PROXY_JOIN_CONTINUE_DELAY_MS = 25;
+    private static final int PROXY_JOIN_CONTINUE_DELAY_MS = 50;
 
     /** Maximum amount of proxy joins processed in a single burst chunk */
-    private static final int PROXY_JOIN_BATCH_SIZE = 40;
+    private static final int PROXY_JOIN_BATCH_SIZE = 10;
+
+    /** Maximum time budget spent in one proxy-join flush run */
+    private static final long PROXY_JOIN_FLUSH_BUDGET_NANOS = 2_000_000L;
+
+    /** Delay for continuing large local join bursts in chunks */
+    private static final int LOCAL_JOIN_CONTINUE_DELAY_MS = 50;
+
+    /** Maximum amount of local joins processed in a single burst chunk */
+    private static final int LOCAL_JOIN_BATCH_SIZE = 10;
+
+    /** Maximum time budget spent in one local-join flush run */
+    private static final long LOCAL_JOIN_FLUSH_BUDGET_NANOS = 2_000_000L;
 
     /** Map of all registered feature where key is feature's identifier */
     private final Map<String, TabFeature> features = new LinkedHashMap<>();
@@ -69,6 +81,14 @@ public class FeatureManager {
     /** Flag preventing scheduling duplicate queue flush tasks */
     @NotNull
     private final AtomicBoolean proxyJoinFlushScheduled = new AtomicBoolean(false);
+
+    /** Pending local joins keyed by UUID, used to coalesce burst joins */
+    @NotNull
+    private final Map<UUID, TabPlayer> pendingLocalJoins = new ConcurrentHashMap<>();
+
+    /** Flag preventing scheduling duplicate local join flush tasks */
+    @NotNull
+    private final AtomicBoolean localJoinFlushScheduled = new AtomicBoolean(false);
 
     /**
      * Calls load() on all features.
@@ -170,6 +190,7 @@ public class FeatureManager {
     public void onQuit(@Nullable TabPlayer disconnectedPlayer) {
         if (disconnectedPlayer == null) return;
         disconnectedPlayer.markOffline();
+        pendingLocalJoins.remove(disconnectedPlayer.getUniqueId());
         long millis = System.currentTimeMillis();
         for (TabFeature f : values) {
             if (!(f instanceof QuitListener)) continue;
@@ -217,23 +238,9 @@ public class FeatureManager {
      *          Player who joined
      */
     public void onJoin(@NotNull TabPlayer connectedPlayer) {
-        long millis = System.currentTimeMillis();
         TAB.getInstance().addPlayer(connectedPlayer);
-        for (TabFeature f : values) {
-            if (!(f instanceof JoinListener)) continue;
-            TimedCaughtTask task = new TimedCaughtTask(TAB.getInstance().getCpu(), () -> ((JoinListener) f).onJoin(connectedPlayer), f.getFeatureName(), CpuUsageCategory.PLAYER_JOIN);
-            if (f instanceof CustomThreaded) {
-                ((CustomThreaded) f).getCustomThread().execute(task);
-            } else {
-                task.run();
-            }
-        }
-        connectedPlayer.markAsLoaded(true);
-        TAB.getInstance().debug("Player join of " + connectedPlayer.getName() + " processed in " + (System.currentTimeMillis()-millis) + "ms");
-        if (TAB.getInstance().getConfiguration().getUsers() instanceof MySQLUserConfiguration) {
-            MySQLUserConfiguration users = (MySQLUserConfiguration) TAB.getInstance().getConfiguration().getUsers();
-            users.load(connectedPlayer);
-        }
+        pendingLocalJoins.put(connectedPlayer.getUniqueId(), connectedPlayer);
+        scheduleLocalJoinFlush(0);
     }
 
     /**
@@ -481,9 +488,11 @@ public class FeatureManager {
         proxyJoinFlushScheduled.set(false);
         if (pendingProxyJoins.isEmpty()) return;
 
+        long start = System.nanoTime();
         List<ProxyPlayer> batch = new ArrayList<>(PROXY_JOIN_BATCH_SIZE);
         for (Map.Entry<UUID, ProxyPlayer> entry : pendingProxyJoins.entrySet()) {
             if (batch.size() >= PROXY_JOIN_BATCH_SIZE) break;
+            if (System.nanoTime() - start >= PROXY_JOIN_FLUSH_BUDGET_NANOS) break;
             if (pendingProxyJoins.remove(entry.getKey(), entry.getValue())) {
                 batch.add(entry.getValue());
             }
@@ -513,6 +522,59 @@ public class FeatureManager {
         }
         if (connectedPlayer.isVanished()) {
             onVanishStatusChange(connectedPlayer);
+        }
+    }
+
+    private void scheduleLocalJoinFlush(int delayMillis) {
+        if (!localJoinFlushScheduled.compareAndSet(false, true)) return;
+        TAB.getInstance().getCpu().getProcessingThread().executeLater(new TimedCaughtTask(
+                TAB.getInstance().getCpu(),
+                this::flushLocalJoinQueue,
+                "LocalJoinQueue",
+                CpuUsageCategory.PLAYER_JOIN
+        ), delayMillis);
+    }
+
+    private void flushLocalJoinQueue() {
+        localJoinFlushScheduled.set(false);
+        if (pendingLocalJoins.isEmpty()) return;
+
+        long start = System.nanoTime();
+        List<TabPlayer> batch = new ArrayList<>(LOCAL_JOIN_BATCH_SIZE);
+        for (Map.Entry<UUID, TabPlayer> entry : pendingLocalJoins.entrySet()) {
+            if (batch.size() >= LOCAL_JOIN_BATCH_SIZE) break;
+            if (System.nanoTime() - start >= LOCAL_JOIN_FLUSH_BUDGET_NANOS) break;
+            if (pendingLocalJoins.remove(entry.getKey(), entry.getValue())) {
+                batch.add(entry.getValue());
+            }
+        }
+
+        for (TabPlayer player : batch) {
+            processLocalJoin(player);
+        }
+
+        if (!pendingLocalJoins.isEmpty()) {
+            scheduleLocalJoinFlush(LOCAL_JOIN_CONTINUE_DELAY_MS);
+        }
+    }
+
+    private void processLocalJoin(@NotNull TabPlayer connectedPlayer) {
+        if (!connectedPlayer.isOnline()) return;
+        long millis = System.currentTimeMillis();
+        for (TabFeature f : values) {
+            if (!(f instanceof JoinListener)) continue;
+            TimedCaughtTask task = new TimedCaughtTask(TAB.getInstance().getCpu(), () -> ((JoinListener) f).onJoin(connectedPlayer), f.getFeatureName(), CpuUsageCategory.PLAYER_JOIN);
+            if (f instanceof CustomThreaded) {
+                ((CustomThreaded) f).getCustomThread().execute(task);
+            } else {
+                task.run();
+            }
+        }
+        connectedPlayer.markAsLoaded(true);
+        TAB.getInstance().debug("Player join of " + connectedPlayer.getName() + " processed in " + (System.currentTimeMillis()-millis) + "ms");
+        if (TAB.getInstance().getConfiguration().getUsers() instanceof MySQLUserConfiguration) {
+            MySQLUserConfiguration users = (MySQLUserConfiguration) TAB.getInstance().getConfiguration().getUsers();
+            users.load(connectedPlayer);
         }
     }
 

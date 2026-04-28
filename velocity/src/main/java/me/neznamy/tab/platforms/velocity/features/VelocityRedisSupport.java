@@ -39,7 +39,7 @@ public class VelocityRedisSupport extends ProxySupport {
     @Subscribe
     public void onMessage(PubSubMessageEvent e) {
         if (!e.getChannel().equals(getChannelName())) return;
-        processMessage(e.getMessage());
+        TAB.getInstance().getCPUManager().runTask(() -> processMessage(e.getMessage()));
     }
 
     @Override

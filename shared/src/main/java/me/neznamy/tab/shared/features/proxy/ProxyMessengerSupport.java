@@ -55,7 +55,8 @@ public class ProxyMessengerSupport extends ProxySupport {
                     return broker;
                 }
             };
-            messenger.subscribe(getChannelName()).consume((channel, lines) -> processMessage(lines[0])).cache(true);
+            messenger.subscribe(getChannelName()).consume((channel, lines) ->
+                    TAB.getInstance().getCPUManager().runTask(() -> processMessage(lines[0]))).cache(true);
             messenger.start();
             TAB.getInstance().getPlatform().logInfo(new TabTextComponent("Successfully connected to " + messengerName, TabTextColor.GREEN));
         } catch (Exception e) {

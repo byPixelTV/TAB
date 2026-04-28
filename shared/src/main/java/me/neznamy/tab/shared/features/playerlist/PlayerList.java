@@ -8,6 +8,7 @@ import me.neznamy.tab.shared.TAB;
 import me.neznamy.tab.shared.TabConstants;
 import me.neznamy.tab.shared.TabConstants.CpuUsageCategory;
 import me.neznamy.tab.shared.chat.component.TabComponent;
+import me.neznamy.tab.shared.cpu.ThreadExecutor;
 import me.neznamy.tab.shared.cpu.TimedCaughtTask;
 import me.neznamy.tab.shared.data.Server;
 import me.neznamy.tab.shared.data.World;
@@ -30,9 +31,10 @@ import java.util.stream.Collectors;
  */
 @Getter
 public class PlayerList extends RefreshableFeature implements TabListFormatManager, JoinListener, Loadable,
-        UnLoadable, QuitListener, WorldSwitchListener, ServerSwitchListener, VanishListener, ProxyFeature, GroupListener, Dumpable {
+        UnLoadable, QuitListener, WorldSwitchListener, ServerSwitchListener, VanishListener, ProxyFeature, GroupListener, Dumpable, CustomThreaded {
 
     @NotNull private final StringToComponentCache cache = new StringToComponentCache("Tablist name formatting", 1000);
+    @NotNull private final ThreadExecutor customThread = new ThreadExecutor("TAB PlayerList Thread");
     @NotNull private final TablistFormattingConfiguration configuration;
     @Nullable private final ProxySupport proxy = TAB.getInstance().getFeatureManager().getFeature(TabConstants.Feature.PROXY_SUPPORT);
     @NotNull private final DisableChecker disableChecker;
